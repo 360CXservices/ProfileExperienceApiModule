@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.SqlTypes;
 using System.Linq;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -48,6 +49,8 @@ namespace VirtoCommerce.ProfileExperienceApiModule.Data.Commands
         private readonly OrganizationValidator _organizationValidator;
         private readonly IOptions<FrontendSecurityOptions> _securityOptions;
         private readonly IMediator _mediator;
+        private readonly Func<UserManager<ApplicationUser>> _userManagerFactory;
+        private readonly Func<RoleManager<Role>> _roleManager;
 
         protected Store CurrentStore { get; private set; }
         protected string EmailVerificationFlow { get; private set; }
@@ -68,7 +71,9 @@ namespace VirtoCommerce.ProfileExperienceApiModule.Data.Commands
             AddressValidator addressValidator,
             OrganizationValidator organizationValidator,
             IOptions<FrontendSecurityOptions> securityOptions,
-            IMediator mediator)
+            IMediator mediator,
+            Func<UserManager<ApplicationUser>> userManagerFactory,
+            Func<RoleManager<Role>> roleManager)
 #pragma warning restore S107
         {
             _mapper = mapper;
@@ -82,6 +87,8 @@ namespace VirtoCommerce.ProfileExperienceApiModule.Data.Commands
             _organizationValidator = organizationValidator;
             _securityOptions = securityOptions;
             _mediator = mediator;
+            _userManagerFactory = userManagerFactory;
+            _roleManager = roleManager;
         }
 
         public virtual async Task<RegisterOrganizationResult> Handle(RegisterRequestCommand request, CancellationToken cancellationToken)
@@ -112,6 +119,11 @@ namespace VirtoCommerce.ProfileExperienceApiModule.Data.Commands
                 return result;
             }
 
+            using (var _userManager = _userManagerFactory())
+                if (_userManager.Users.Any(x => x.PhoneNumber == request.Contact.PhoneNumber))
+                    return await CheckPhoneNumberExistence(request, cancellationTokenSource);
+
+
 
             await ProcessRequestAsync(request, result, cancellationTokenSource);
 
@@ -123,6 +135,38 @@ namespace VirtoCommerce.ProfileExperienceApiModule.Data.Commands
             }
 
             return result;
+        }
+
+        private async Task<RegisterOrganizationResult> CheckPhoneNumberExistence(RegisterRequestCommand request, CancellationTokenSource cancellationTokenSource)
+        {
+            using (var _userManager = _userManagerFactory())
+            {
+                var result = new RegisterOrganizationResult();
+
+                var RequiredEmailVerification = EmailVerificationFlow == ModuleConstants.RegistrationFlows.EmailVerificationRequired;
+                RequiredEmailVerification = EmailVerificationFlow == ModuleConstants.RegistrationFlows.EmailVerificationOptional;
+                var user = _userManager.Users.FirstOrDefault(x => x.PhoneNumber == request.Contact.PhoneNumber);
+                user.Email = request.Account.Email;
+                user.UserName = request.Account.UserName;
+                user.StoreId = request.StoreId;
+                user.Password = request.Account.Password;
+                user.UserType = _userType;
+                user.IsAdministrator = false;
+                user.EmailConfirmed = RequiredEmailVerification ? false : true;
+                var identityResult = await _userManager.UpdateAsync(user);
+
+
+                result.Contact = await ToContact(request.Contact, ToApplicationUser(request.Account), request.LanguageCode, RequiredEmailVerification);
+                result.AccountCreationResult = ToAccountCreationResult(identityResult, user, RequiredEmailVerification);
+
+                if (request.Organization != null)
+                    result.Organization = await ToOrganization(request.Organization, result.Contact, user);
+
+                if (RequiredEmailVerification)
+                    await SendRegistrationEmailNotificationAsync(request, result, cancellationTokenSource);
+
+                return result;
+            }
         }
 
         //new method
